@@ -65,6 +65,9 @@ const Sound = (() => {
     missile(t) { noise(0.5, 0.3, 'bandpass', 700, 3500, t, sfxBus, 3); tone('sine', 300, 900, 0.3, 0.07, t); },
     flame(t)   { noise(0.14, 0.28, 'bandpass', 700, 350, t, sfxBus, 0.6); },
     switch(t)  { tone('square', 800, 800, 0.03, 0.08, t); tone('square', 1200, 1200, 0.03, 0.08, t + 0.05); },
+    buy(t)     { tone('square', 988, 988, 0.07, 0.1, t); tone('square', 1319, 1319, 0.18, 0.1, t + 0.07); },
+    shop(t)    { [523, 659, 784, 659, 1047].forEach((f, i) => tone('triangle', f, f, 0.14, 0.18, t + i * 0.08)); },
+    shield(t)  { tone('sine', 600, 1500, 0.22, 0.22, t); noise(0.18, 0.2, 'highpass', 4000, 2000, t); },
     empty(t)   { tone('square', 180, 120, 0.06, 0.1, t); noise(0.03, 0.15, 'highpass', 3000, 3000, t); },
     groan(t) {
       const o = ac.createOscillator(), lfo = ac.createOscillator(), lg = ac.createGain();

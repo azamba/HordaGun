@@ -18,6 +18,40 @@ const WEAPON_ORDER = Object.keys(WEAPONS);
 // tiros necessários para destravar cada arma (aumenta um pouco a cada onda)
 const WEAPON_UNLOCK = { shotgun: 25, minigun: 50, laser: 40, rocket: 60, missile: 70, flame: 45 };
 
+// moedas por zumbi morto; ao fim de cada onda ganha também 10 + onda * 5
+const COINS = { walker: 1, runner: 1, tank: 4, boss: 40 };
+const MAX_SHIELD = 3;
+
+// loja entre as ondas
+const UPGRADES = [
+  { name: 'DANO', color: '#ef4444', desc: ['+15% de dano', 'em todas as armas'], max: 10,
+    cost: () => Math.round(30 * 1.45 ** S.up.dmg), level: () => S.up.dmg,
+    info: () => `nível ${S.up.dmg}/10`, buy: () => { S.up.dmg++; } },
+  { name: 'CADÊNCIA', color: '#fde047', desc: ['+10% de tiros', 'por segundo'], max: 10,
+    cost: () => Math.round(30 * 1.45 ** S.up.rate), level: () => S.up.rate,
+    info: () => `nível ${S.up.rate}/10`, buy: () => { S.up.rate++; } },
+  { name: '+1 ATIRADOR', color: '#60a5fa', desc: ['mais um soldado', 'no esquadrão'], max: Infinity,
+    cost: () => Math.round(25 * 1.3 ** S.up.squad), level: () => S.up.squad,
+    can: () => S.count < MAX_SQUAD,
+    info: () => `esquadrão: ${S.count}/${MAX_SQUAD}`, buy: () => { S.up.squad++; S.count++; } },
+  { name: 'MUNIÇÃO', color: '#a3e635', desc: ['+50% de munição para', 'cada arma que você tem'], max: Infinity,
+    cost: () => 40 + 15 * S.up.ammo, level: () => S.up.ammo,
+    can: () => WEAPON_ORDER.some(k => k !== 'pistol' && S.owned[k]),
+    info: () => !UPGRADES[3].can() ? 'precisa de uma arma' : S.up.ammo ? `comprado ${S.up.ammo}x` : 'recarrega todas',
+    buy: () => {
+      S.up.ammo++;
+      for (const k of WEAPON_ORDER) if (k !== 'pistol' && S.owned[k]) S.ammo[k] += Math.ceil(WEAPONS[k].ammo * 0.5);
+    } },
+  { name: 'CAIXOTES', color: '#d9a066', desc: ['caixotes e painéis pedem', '-10% de tiros'], max: 5,
+    cost: () => Math.round(40 * 1.6 ** S.up.unlock), level: () => S.up.unlock,
+    info: () => `nível ${S.up.unlock}/5`, buy: () => { S.up.unlock++; } },
+  { name: 'ESCUDO', color: '#22d3ee', desc: ['bloqueia 1 ataque', 'de zumbi'], max: MAX_SHIELD,
+    cost: () => 50 + 25 * S.shield, level: () => S.shield,
+    info: () => `escudos: ${S.shield}/${MAX_SHIELD}`, buy: () => { S.shield++; } },
+];
+const dmgMult = () => 1 + 0.15 * S.up.dmg;
+const rateMult = () => 1 + 0.1 * S.up.rate;
+
 // ===================== SETUP =====================
 const cv = document.getElementById('c');
 const ctx = cv.getContext('2d');
@@ -50,6 +84,8 @@ function reset() {
     x: W / 2, tx: W / 2, count: 3,
     weapon: 'pistol', fireCd: 0, muzzle: 0,
     owned: { pistol: true },
+    coins: 0, shield: 0, up: { dmg: 0, rate: 0, squad: 0, ammo: 0, unlock: 0 },
+    shopAt: 0, shopBonus: 0, hover: -1,
     ammo: Object.fromEntries(WEAPON_ORDER.map(k => [k, k === 'pistol' ? Infinity : 0])),
     bullets: [], zombies: [], items: [], parts: [], texts: [], decals: [], booms: [],
     wave: 1, toSpawn: waveSize(1), spawnCd: 1.5, itemCd: 2.5,
@@ -106,6 +142,7 @@ function spawnItem() {
     const k = pick(notOwned.length && Math.random() < 0.6 ? notOwned : all);
     it = { kind: 'weapon', weapon: k, need: WEAPON_UNLOCK[k] + (w - 1) * 4 };
   }
+  it.need = Math.max(5, Math.ceil(it.need * (1 - 0.1 * S.up.unlock)));
   it.w = 90; it.h = 66; it.x = rand(55, W - 55); it.y = -40; it.hits = 0; it.flash = 0; it.pop = 0;
   S.items.push(it);
 }
@@ -143,7 +180,7 @@ function fire() {
       const sp = w.range ? w.speed * rand(0.8, 1.2) : w.speed;
       const life = w.range ? w.range * rand(0.85, 1.15) : 4;
       S.bullets.push({ x: s.x + 4, y: s.y + tip, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, kind: k,
-        dmg: w.dmg, pierce: w.pierce || 1, splash: w.splash || 0, color: w.color, glow: SPR.glow[k], hit: [],
+        dmg: w.dmg * dmgMult(), pierce: w.pierce || 1, splash: w.splash || 0, color: w.color, glow: SPR.glow[k], hit: [],
         life, max: life, target: null });
     }
   }
@@ -207,6 +244,8 @@ function damage(z, dmg) {
   if (z.hp > 0) { Sound.play('hit'); return; }
   z.dead = true;
   S.score += z.score; S.kills++;
+  S.coins += COINS[z.type];
+  if (COINS[z.type] >= 4) floatText(z.x, z.y - z.r - 10, '+' + COINS[z.type], '#fbbf24', 16);
   const big = z.type === 'boss';
   gore(z.x, z.y, big ? 60 : z.type === 'tank' ? 24 : 12);
   addDecal(z.x, z.y, z.r / 18);
@@ -256,6 +295,14 @@ function unlock(it) {
 }
 
 function loseShooter(x, y) {
+  if (S.shield > 0) {
+    S.shield--;
+    burst(x, y, '#22d3ee', 20, 220);
+    floatText(x, y - 20, 'ESCUDO!', '#22d3ee', 20);
+    S.shake = 0.1;
+    Sound.play('shield');
+    return;
+  }
   S.count--;
   burst(x, y, '#3a86ff', 12, 180);
   gore(x, y, 10);
@@ -271,6 +318,38 @@ function gameOver() {
   Sound.stopMusic();
   Sound.play('over');
   if (S.score > best) { best = S.score; try { localStorage.setItem('hordagun_best', best); } catch (e) {} }
+}
+
+// ===================== LOJA =====================
+const SHOP_DELAY = 0.6; // ignora cliques logo que a loja abre (evita comprar/pular sem querer)
+function upState(u) {
+  if (u.level() >= u.max || (u.can && !u.can())) return 'max';
+  return S.coins < u.cost() ? 'poor' : 'ok';
+}
+function openShop() {
+  S.shopBonus = 10 + S.wave * 5;
+  S.coins += S.shopBonus;
+  S.bullets.length = 0;
+  mode = 'shop'; S.shopAt = clock; S.hover = -1;
+  mouseDown = false;
+  Sound.stopMusic();
+  Sound.play('shop');
+}
+function buyUpgrade(i) {
+  const u = UPGRADES[i];
+  if (!u || mode !== 'shop' || clock - S.shopAt < SHOP_DELAY) return;
+  if (upState(u) !== 'ok') { Sound.play('empty'); return; }
+  S.coins -= u.cost();
+  u.buy();
+  Sound.play('buy');
+}
+function nextWave() {
+  if (mode !== 'shop' || clock - S.shopAt < SHOP_DELAY) return;
+  mode = 'play';
+  S.wave++; S.toSpawn = waveSize(S.wave); S.spawnCd = 2; S.banner = 2;
+  Sound.startMusic();
+  Sound.play('wave');
+  if (S.wave % 5 === 0) spawnBoss();
 }
 
 // ===================== UPDATE =====================
@@ -293,7 +372,7 @@ function update(dt) {
   S.fireCd = Math.max(S.fireCd - dt, firing ? -0.2 : 0);
   while (firing && S.fireCd <= 0) {
     if (!fire()) break;
-    S.fireCd += 1 / WEAPONS[S.weapon].rate;
+    S.fireCd += 1 / (WEAPONS[S.weapon].rate * rateMult());
   }
 
   // spawn de zumbis / ondas
@@ -304,9 +383,8 @@ function update(dt) {
       S.spawnCd = Math.max(0.15, 1.4 - S.wave * 0.08) * rand(0.5, 1.4);
     }
   } else if (S.zombies.length === 0) {
-    S.wave++; S.toSpawn = waveSize(S.wave); S.spawnCd = 2; S.banner = 2;
-    Sound.play('wave');
-    if (S.wave % 5 === 0) spawnBoss();
+    openShop();
+    return;
   }
   Sound.setBoss(S.zombies.some(z => z.type === 'boss'));
   if (S.zombies.length && Math.random() < dt * Math.min(1.5, S.zombies.length * 0.08)) Sound.play('groan');
@@ -467,17 +545,79 @@ function drawHUD() {
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, 62);
 
   outlined('ONDA ' + S.wave, 12, 26, 22, '#fde047', 'left');
-  outlined(S.score + ' pts', 12, 48, 14, '#e2e8f0', 'left', 3);
+  drawCoin(19, 43, 7);
+  outlined(String(S.coins), 30, 49, 15, '#fbbf24', 'left', 3);
+  outlined(S.score + ' pts', 88, 49, 12, '#94a3b8', 'left', 3);
 
   drawSprite(ctx, SPR.soldier[S.weapon], W / 2 - 28, 30, 0, 0.62);
   outlined('x' + S.count, W / 2 - 14, 30, 22, '#60a5fa', 'left');
   outlined('zumbis: ' + (S.toSpawn + S.zombies.length), W / 2, 52, 12, '#a3e635', 'center', 3);
+  if (S.shield > 0) outlined('escudo ' + S.shield, W / 2 + 58, 30, 12, '#22d3ee', 'left', 3);
 
   const w = WEAPONS[S.weapon];
   outlined(w.name, W - 50, 24, 15, w.color, 'right');
   outlined(fmtAmmo(S.weapon), W - 50, 46, 14, '#e2e8f0', 'right', 3);
   drawMuteIcon();
   drawInventory();
+}
+
+function drawCoin(x, y, r) {
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+  g.addColorStop(0, '#fff3b0'); g.addColorStop(0.5, '#fbbf24'); g.addColorStop(1, '#b45309');
+  ctx.fillStyle = g; circ(ctx, x, y, r);
+  ctx.strokeStyle = 'rgba(120,53,15,0.8)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.6, 0, Math.PI * 2); ctx.stroke();
+}
+
+const SHOP = { x0: 22, y0: 190, w: 212, h: 120, gx: 12, gy: 12, btn: { x: 100, y: 604, w: 280, h: 58 } };
+function shopCardRect(i) {
+  const c = i % 2, r = Math.floor(i / 2);
+  return { x: SHOP.x0 + c * (SHOP.w + SHOP.gx), y: SHOP.y0 + r * (SHOP.h + SHOP.gy), w: SHOP.w, h: SHOP.h };
+}
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+function shopHit(p) {
+  for (let i = 0; i < UPGRADES.length; i++) if (inRect(p, shopCardRect(i))) return i;
+  return inRect(p, SHOP.btn) ? 'next' : -1;
+}
+
+function drawShop() {
+  ctx.fillStyle = 'rgba(5,8,14,0.9)'; ctx.fillRect(0, 0, W, H);
+  outlined('LOJA', W / 2, 92, 46, '#fde047', 'center', 7);
+  outlined(`Onda ${S.wave} concluída!  Bônus +${S.shopBonus}`, W / 2, 124, 15, '#a3e635', 'center', 3);
+  ctx.font = "900 28px 'Trebuchet MS', system-ui, sans-serif";
+  const cw = ctx.measureText(String(S.coins)).width;
+  drawCoin(W / 2 - cw / 2 - 14, 158, 11);
+  outlined(String(S.coins), W / 2 + 6, 168, 28, '#fbbf24', 'center', 5);
+
+  UPGRADES.forEach((u, i) => {
+    const r = shopCardRect(i), st = upState(u), hov = S.hover === i && st === 'ok';
+    ctx.fillStyle = hov ? '#2a3140' : '#171c25';
+    rr(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
+    ctx.strokeStyle = st === 'ok' ? u.color : 'rgba(255,255,255,0.12)'; ctx.lineWidth = hov ? 3 : 1.5; ctx.stroke();
+    ctx.globalAlpha = st === 'max' ? 0.45 : 1;
+    ctx.fillStyle = u.color; rr(ctx, r.x + 6, r.y + 12, 4, r.h - 24, 2); ctx.fill();
+    outlined(u.name, r.x + 18, r.y + 28, 17, u.color, 'left', 3);
+    outlined('[' + (i + 1) + ']', r.x + r.w - 10, r.y + 24, 12, '#94a3b8', 'right', 3);
+    ctx.font = "13px 'Trebuchet MS', system-ui, sans-serif"; ctx.fillStyle = '#cbd5e1'; ctx.textAlign = 'left';
+    u.desc.forEach((d, j) => ctx.fillText(d, r.x + 18, r.y + 52 + j * 17));
+    outlined(u.info(), r.x + 18, r.y + r.h - 14, 12, '#94a3b8', 'left', 3);
+    if (st === 'max') outlined(u.level() >= u.max ? 'MÁXIMO' : '—', r.x + r.w - 12, r.y + r.h - 13, 13, '#64748b', 'right', 3);
+    else {
+      const c = String(u.cost());
+      outlined(c, r.x + r.w - 12, r.y + r.h - 12, 18, st === 'ok' ? '#fbbf24' : '#ef4444', 'right', 4);
+      drawCoin(r.x + r.w - 22 - ctx.measureText(c).width, r.y + r.h - 18, 7);
+    }
+    ctx.globalAlpha = 1;
+  });
+
+  const b = SHOP.btn, hovB = S.hover === 'next', ready = clock - S.shopAt >= SHOP_DELAY;
+  ctx.fillStyle = !ready ? '#14532d' : hovB ? '#22c55e' : '#16a34a';
+  rr(ctx, b.x, b.y, b.w, b.h, 12); ctx.fill();
+  ctx.strokeStyle = '#86efac'; ctx.lineWidth = 2; ctx.stroke();
+  outlined('PRÓXIMA ONDA  »', W / 2, b.y + 38, 22, '#fff', 'center', 4);
+  ctx.font = "13px 'Trebuchet MS', system-ui, sans-serif"; ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'center';
+  ctx.fillText('1 a 6 = comprar     Enter = próxima onda', W / 2, b.y + b.h + 28);
+  if ((S.wave + 1) % 5 === 0) outlined('Atenção: a próxima onda tem CHEFÃO!', W / 2, b.y + b.h + 56, 15, '#d946ef', 'center', 3);
 }
 
 function fmtAmmo(k) { return S.ammo[k] === Infinity ? '∞' : String(S.ammo[k]); }
@@ -538,6 +678,7 @@ function drawMenu() {
     'Teclas 1 a 7 ou rodinha: trocar de arma',
     'Atire nos CAIXOTES para ganhar armas e munição',
     'Atire nos painéis AZUIS para ganhar atiradores',
+    'Entre as ondas: LOJA de upgrades com suas moedas',
     '', 'Clique ou ESPAÇO para começar', 'M = som   P = pausa', best ? 'Recorde: ' + best : ''], '#fde047');
   const bob = Math.sin(clock * 3);
   drawSprite(ctx, SPR.zombie.boss0[bob > 0 ? 1 : 0], W / 2, 170 + bob * 4, Math.sin(clock * 1.5) * 0.1);
@@ -562,6 +703,14 @@ function draw() {
   for (const it of S.items) drawItem(it);
   for (const z of S.zombies) drawZombie(z);
   for (let i = sl.length - 1; i >= 0; i--) drawSprite(ctx, SPR.soldier[S.weapon], sl[i].x, sl[i].y);
+  if (S.shield > 0 && S.count > 0) { // bolha do escudo em volta do esquadrão
+    const rows = Math.ceil(S.count / PER_ROW), half = (rows - 1) * ROW_GAP / 2;
+    ctx.beginPath();
+    ctx.ellipse(S.x, SQUAD_Y + half - 6, squadHalfWidth() + 14, half + 30, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(34,211,238,0.07)'; ctx.fill();
+    ctx.strokeStyle = `rgba(34,211,238,${0.45 + Math.sin(clock * 4) * 0.15})`; ctx.lineWidth = 1 + S.shield;
+    ctx.stroke();
+  }
 
   // brilhos (modo aditivo)
   ctx.globalCompositeOperation = 'lighter';
@@ -635,6 +784,7 @@ function draw() {
     ctx.globalAlpha = 1;
   }
 
+  if (mode === 'shop') drawShop();
   if (mode === 'menu') drawMenu();
   if (mode === 'paused') overlay('PAUSADO', ['P para continuar'], '#fff');
   if (mode === 'over') overlay('GAME OVER', [
@@ -656,12 +806,18 @@ let mouseDown = false; // botão esquerdo (ou dedo na tela) pressionado = atiran
 cv.addEventListener('pointermove', e => {
   if (e.pointerType === 'mouse' && !(e.buttons & 1)) mouseDown = false; // soltou fora da janela
   if (mode === 'play') S.tx = toGame(e).x;
+  if (mode === 'shop') S.hover = shopHit(toGame(e));
 });
 cv.addEventListener('pointerdown', e => {
   Sound.init();
   const p = toGame(e);
   if (Math.hypot(p.x - MUTE_BTN.x, p.y - MUTE_BTN.y) < MUTE_BTN.r + 6) { Sound.toggleMute(); return; }
   if (mode === 'menu' || mode === 'over') { start(); return; }
+  if (mode === 'shop') {
+    const h = shopHit(p);
+    if (h === 'next') nextWave(); else if (h >= 0) buyUpgrade(h);
+    return;
+  }
   if (mode !== 'play') return;
   const slot = invSlotAt(p.x, p.y);
   if (slot >= 0) { selectWeapon(WEAPON_ORDER[slot]); return; }
@@ -685,6 +841,10 @@ addEventListener('keydown', e => {
   if (e.key === ' ' && (mode === 'menu' || mode === 'over')) start();
   if (e.key === 'p' || e.key === 'P') togglePause();
   if (e.key === 'm' || e.key === 'M') { Sound.init(); Sound.toggleMute(); }
+  if (mode === 'shop') {
+    if (e.key >= '1' && e.key <= String(UPGRADES.length)) buyUpgrade(+e.key - 1);
+    if (e.key === 'Enter') nextWave();
+  }
   if (mode === 'play') {
     if (e.key >= '1' && e.key <= String(WEAPON_ORDER.length)) selectWeapon(WEAPON_ORDER[+e.key - 1]);
     if (e.key === 'q' || e.key === 'Q') cycleWeapon(-1);
